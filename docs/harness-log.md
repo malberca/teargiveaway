@@ -52,3 +52,9 @@
 - No se configuró ni realizó ningún deploy.
 - El repositorio remoto estaba vacío y aún no existe un commit inicial; los cambios quedan en la rama local indicada hasta que se autorice una futura entrega remota.
 - Los sorteos no se guardan ni hay verificación automática de follows, likes o stories; esas condiciones se revisan manualmente.
+
+## Seguimiento — 2026-11-07
+
+- Se corrigió `assets.directory` de Wrangler a `./dist/client`, que es donde Vite genera `index.html` y copia `public/`. La ruta anterior servía el fallback de la SPA para las imágenes y hacía que se vieran como archivos faltantes.
+- La configuración de cada sorteo ahora permite elegir entre 1 y 20 ganadores. El total seleccionado determina la cantidad de extracciones, el progreso, la animación, el estado final y las tarjetas de resultados. Se conserva 5 como valor inicial y el sorteo sigue permitiendo ganadores repetidos.
+- Verificaciones: `git diff --check`, `npm run typecheck` y `npm run build` completados correctamente. Wrangler mostró el aviso conocido `EPERM` al escribir su archivo de log; el build finalizó con código 0 y generó los assets en `dist/client/`.

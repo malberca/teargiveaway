@@ -173,6 +173,10 @@
   line-height: 1.35;
 }
 
+.winners {
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
 .draw-panel .result-actions {
   justify-content: flex-start;
   margin-top: 18px;
