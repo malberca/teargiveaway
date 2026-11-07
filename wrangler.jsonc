@@ -3,6 +3,7 @@
   "name": "tear-sorteos",
   "main": "./worker/index.ts",
   "compatibility_date": "2026-11-07",
+  "previews": {},
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
