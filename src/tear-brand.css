@@ -1,0 +1,94 @@
+/* TEAR Store reference: clean white chrome, confident black type, lilac details. */
+.reference-banner {
+  width: calc(100% + 84px);
+  margin: 0 -42px;
+  overflow: hidden;
+  background: #fff;
+  line-height: 0;
+}
+
+.reference-banner img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.topbar {
+  border-bottom: 1px solid #ece9ef;
+}
+
+.wordmark {
+  gap: 0;
+  font-size: 20px;
+  letter-spacing: -1px;
+}
+
+.wordmark small {
+  font-size: 8px;
+  letter-spacing: 2px;
+}
+
+.footer-brand.wordmark {
+  font-size: 15px;
+}
+
+.home-intro h1 {
+  font-family: "DM Sans", sans-serif;
+  font-size: 42px;
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -1.8px;
+  text-transform: uppercase;
+}
+
+.home-intro h1 em {
+  color: #9b82c8;
+  font-style: normal;
+}
+
+.home-intro {
+  min-height: 0;
+  grid-template-columns: 1fr;
+  padding-top: 30px;
+  padding-bottom: 32px;
+}
+
+.home-intro .lucky-art {
+  display: none;
+}
+
+.home-empty,
+.setup-card,
+.workspace,
+.winners-panel {
+  border-radius: 4px;
+}
+
+.new-button,
+.continue-button,
+.draw-button {
+  border-radius: 2px;
+}
+
+@media (max-width: 760px) {
+  .reference-banner {
+    width: calc(100% + 40px);
+    margin: 0 -20px;
+  }
+
+  .home-intro h1 {
+    font-size: 37px;
+  }
+}
+
+@media (max-width: 480px) {
+  .reference-banner {
+    width: calc(100% + 30px);
+    margin: 0 -15px;
+  }
+
+  .home-intro h1 {
+    font-size: 32px;
+    letter-spacing: -1.1px;
+  }
+}
