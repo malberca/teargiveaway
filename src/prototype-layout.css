@@ -313,3 +313,37 @@
     object-position: center 82%;
   }
 }
+
+.import-progress { display: flex; align-items: center; gap: 9px; margin-top: 12px; font-size: 12px; font-weight: 700; letter-spacing: .04em; color: #6d5a8a; }
+.spinner { width: 14px; height: 14px; flex: none; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: tear-spin .8s linear infinite; }
+@keyframes tear-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+/* The "Hasta N" cap is a dropdown that sits in the same row as Aceptar and Rechazar.
+   The theme's `.btn.primary` uses the `background` shorthand, which erases the arrow, so the arrow is restated here
+   with higher specificity (also on hover). */
+.btn.per-account-select { appearance: none; -webkit-appearance: none; min-width: 176px; padding-right: 36px; cursor: pointer; text-align: left; background-repeat: no-repeat; background-position: right 14px center; background-size: 12px 8px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23282233' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.btn.per-account-select.primary { background-color: #a59bc7; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; background-size: 12px 8px; }
+.btn.per-account-select.primary:hover:not(:disabled) { background-color: #8e82b6; }
+
+/* Winner names: some air between letters, and smaller sizes for long usernames. */
+.stage .slot.slot-long { font-size: clamp(28px, 4.4vw, 56px); }
+.stage .slot.slot-xlong { font-size: clamp(22px, 3.4vw, 42px); }
+
+/* Confetti and party emojis stay inside the stage, which already clips its overflow. */
+.stage > .confetti { position: absolute; inset: 0; z-index: 2; overflow: hidden; pointer-events: none; }
+.confetti-piece { position: absolute; top: -14px; left: var(--x); width: var(--size); height: calc(var(--size) * 1.7); background: var(--color); border-radius: 2px; opacity: 0; animation: confetti-fall var(--dur) var(--delay) cubic-bezier(.22, .68, .35, 1) forwards; }
+.confetti-piece.dot { height: var(--size); border-radius: 50%; }
+.confetti-piece.ribbon { height: calc(var(--size) * 2.6); width: calc(var(--size) * .45); }
+.confetti-emoji { position: absolute; bottom: -48px; left: var(--x); font-size: var(--size); line-height: 1; opacity: 0; animation: emoji-rise var(--dur) var(--delay) ease-out forwards; }
+.confetti-static { display: flex; align-items: flex-end; justify-content: center; padding-bottom: 14px; font-size: 30px; letter-spacing: .3em; }
+@keyframes confetti-fall {
+  0% { opacity: 1; transform: translate3d(0, 0, 0) rotate(0); }
+  85% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(var(--drift), 520px, 0) rotate(var(--rot)); }
+}
+@keyframes emoji-rise {
+  0% { opacity: 0; transform: translate3d(0, 0, 0) scale(.4) rotate(0); }
+  15% { opacity: 1; transform: translate3d(calc(var(--drift) * .2), -60px, 0) scale(1.15) rotate(var(--rot)); }
+  100% { opacity: 0; transform: translate3d(var(--drift), -460px, 0) scale(1) rotate(calc(var(--rot) * -1)); }
+}

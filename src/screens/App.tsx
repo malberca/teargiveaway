@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, ArrowUpRight, Check, Instagram, Plus, RotateCcw, Ticket, Upload } from 'lucide-react'
 import { useReducedMotion } from 'motion/react'
 import { parseComments } from '../services/comments'
 import { drawWinners, type Winner } from '../logic/draw'
+import Confetti from '../components/Confetti'
+import { parseSavedState, STORAGE_KEY, type SavedState } from '../services/savedState'
 
 const example = [
   '@martin: ¡Vamos! @lucas @sofia @tomas',
@@ -19,15 +21,17 @@ const example = [
   '@sofia: @luli @flor @martin',
 ].join('\n')
 
-type View = 'home' | 'setup' | 'entries'
+export type View = 'home' | 'setup' | 'entries'
 type Requirement = 'follow' | 'like' | 'share' | 'mention'
+type DuplicatePolicy = 'all' | 'limit' | 'one'
 
-interface RaffleConfig {
+export interface RaffleConfig {
   title: string
   postUrl: string
   prizes: string
   winnerCount: number
-  allowDuplicates: boolean
+  duplicates: DuplicatePolicy
+  maxPerAccount: number
   minMentions: number
   requirements: Requirement[]
 }
@@ -38,7 +42,79 @@ interface InstagramStatus {
   expiresAt: string | null
 }
 
-const emptyConfig: RaffleConfig = { title: '', postUrl: '', prizes: '', winnerCount: 5, allowDuplicates: true, minMentions: 1, requirements: [] }
+interface ImportProgress {
+  stage: 'search' | 'comments'
+  count: number
+}
+
+interface ImportResult {
+  comments: Array<{ username?: string; text?: string }>
+  truncated?: boolean
+}
+
+// The server streams newline-delimited JSON: progress events, then one `done` (or `error`).
+async function readImportStream(body: ReadableStream<Uint8Array>, onProgress: (progress: ImportProgress) => void): Promise<ImportResult> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: ImportResult | null = null
+  const handle = (line: string) => {
+    if (!line.trim()) return
+    const event = JSON.parse(line) as { type: string; stage?: ImportProgress['stage']; count?: number; message?: string } & Partial<ImportResult>
+    if (event.type === 'progress' && event.stage) onProgress({ stage: event.stage, count: event.count ?? 0 })
+    else if (event.type === 'done') result = { comments: event.comments ?? [], truncated: event.truncated }
+    else if (event.type === 'error') throw new Error(event.message || 'No se pudieron cargar los comentarios.')
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let index = buffer.indexOf('\n')
+    while (index >= 0) {
+      handle(buffer.slice(0, index))
+      buffer = buffer.slice(index + 1)
+      index = buffer.indexOf('\n')
+    }
+  }
+  handle(buffer + decoder.decode())
+  if (!result) throw new Error('La conexión se cortó antes de terminar de cargar los comentarios.')
+  return result
+}
+
+const perAccountOptions = [2, 3, 5, 10, 15, 20, 25, 30, 40, 50]
+
+function maxPerAccountOf(config: Pick<RaffleConfig, 'duplicates' | 'maxPerAccount'>): number {
+  if (config.duplicates === 'one') return 1
+  return config.duplicates === 'limit' ? config.maxPerAccount : Number.POSITIVE_INFINITY
+}
+
+function duplicatesLabel(config: Pick<RaffleConfig, 'duplicates' | 'maxPerAccount'>): string {
+  if (config.duplicates === 'one') return 'un comentario válido por cuenta'
+  return config.duplicates === 'limit' ? `hasta ${config.maxPerAccount} comentarios por cuenta` : 'comentarios repetidos aceptados'
+}
+
+function duplicatesShort(config: Pick<RaffleConfig, 'duplicates' | 'maxPerAccount'>): string {
+  if (config.duplicates === 'one') return '1 X CUENTA'
+  return config.duplicates === 'limit' ? `HASTA ${config.maxPerAccount}` : 'TODOS'
+}
+
+const emptyConfig: RaffleConfig = { title: '', postUrl: '', prizes: '', winnerCount: 5, duplicates: 'all', maxPerAccount: 10, minMentions: 1, requirements: [] }
+
+// Long Instagram usernames (up to 30 characters) need a smaller size to stay on the stage.
+function slotSizeClass(name: string): string {
+  if (name.length > 22) return 'slot-xlong'
+  return name.length > 14 ? 'slot-long' : ''
+}
+
+function loadSavedState(): SavedState | null {
+  try { return parseSavedState(window.localStorage.getItem(STORAGE_KEY), emptyConfig) } catch { return null }
+}
+
+// The draw animation is not saved, so the stage text is rebuilt from the winners that are.
+function stageBottomFor(config: Pick<RaffleConfig, 'winnerCount'>, winners: Winner[]): string {
+  if (!winners.length) return `${config.winnerCount} PREMIOS · INFINITAS POSIBILIDADES`
+  return winners.length >= config.winnerCount ? 'TODOS LOS PREMIOS FUERON ASIGNADOS' : `PREMIO ${winners.length} DE ${config.winnerCount}`
+}
 const requirementLabels: Record<Requirement, string> = {
   follow: 'Seguir la cuenta',
   like: 'Dar like a la publicación',
@@ -71,25 +147,45 @@ function parseCsvRows(input: string): string[][] {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>('home')
-  const [config, setConfig] = useState<RaffleConfig>(emptyConfig)
-  const [raw, setRaw] = useState('')
-  const [winners, setWinners] = useState<Winner[]>([])
+  const [restored] = useState(loadSavedState)
+  const [view, setView] = useState<View>(restored?.view ?? 'home')
+  const [config, setConfig] = useState<RaffleConfig>(restored?.config ?? emptyConfig)
+  const [raw, setRaw] = useState(restored?.raw ?? '')
+  const [winners, setWinners] = useState<Winner[]>(restored?.winners ?? [])
   const [pendingWinner, setPendingWinner] = useState<Winner | null>(null)
   const [drawing, setDrawing] = useState(false)
-  const [rollingName, setRollingName] = useState('¿LISTOS?')
+  const [rollingName, setRollingName] = useState(restored?.winners.length ? restored.winners[restored.winners.length - 1].username : '¿LISTOS?')
   const [stageTop, setStageTop] = useState('TODO LISTO PARA ARRANCAR')
-  const [stageBottom, setStageBottom] = useState('5 PREMIOS · INFINITAS POSIBILIDADES')
-  const [status, setStatus] = useState('Cargá participantes para empezar.')
+  const [stageBottom, setStageBottom] = useState(restored ? stageBottomFor(restored.config, restored.winners) : '5 PREMIOS · INFINITAS POSIBILIDADES')
+  const [status, setStatus] = useState(restored?.raw || restored?.winners.length ? 'Sorteo restaurado: la configuración, los comentarios y los ganadores se guardaron en este navegador.' : 'Cargá participantes para empezar.')
   const [instagram, setInstagram] = useState<InstagramStatus>({ connected: false, username: null, expiresAt: null })
   const [instagramBusy, setInstagramBusy] = useState(false)
+  const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
+  // Set when a winner is confirmed; cleared after the celebration so it never replays on a refresh.
+  const [confettiKey, setConfettiKey] = useState<number | null>(null)
+  useEffect(() => {
+    if (confettiKey === null) return
+    const timer = window.setTimeout(() => setConfettiKey(null), 7000)
+    return () => window.clearTimeout(timer)
+  }, [confettiKey])
+  // Saved shortly after every change, and immediately when the page is refreshed or closed.
+  const latest = useRef<SavedState>({ view, config, raw, winners })
+  latest.current = { view, config, raw, winners }
+  useEffect(() => {
+    const save = () => {
+      try { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(latest.current)) } catch { setStatus('No se pudo guardar el sorteo en este navegador (sin espacio o bloqueado).') }
+    }
+    const timer = window.setTimeout(save, 400)
+    window.addEventListener('pagehide', save)
+    return () => { window.clearTimeout(timer); window.removeEventListener('pagehide', save) }
+  }, [view, config, raw, winners])
   const reduceMotion = useReducedMotion()
   const requiresMentions = config.requirements.includes('mention')
   const parsed = useMemo(() => parseComments(raw, {
-    allowDuplicates: config.allowDuplicates,
+    maxPerAccount: maxPerAccountOf(config),
     requireMentions: requiresMentions,
     minMentions: config.minMentions,
-  }), [raw, config.allowDuplicates, requiresMentions, config.minMentions])
+  }), [raw, config.duplicates, config.maxPerAccount, requiresMentions, config.minMentions])
   const prizeList = config.prizes.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
 
   async function refreshInstagramStatus() {
@@ -144,24 +240,33 @@ export default function App() {
       return
     }
     setInstagramBusy(true)
-    setStatus('Cargando comentarios desde Instagram...')
+    setImportProgress({ stage: 'search', count: 0 })
+    setStatus('Buscando la publicación en Instagram...')
     try {
       const response = await fetch('/api/instagram/comments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ postUrl: config.postUrl }),
+        body: JSON.stringify({ postUrl: config.postUrl, stream: true }),
       })
-      const result = await response.json() as { comments?: Array<{ username?: string; text?: string }>; error?: string }
-      if (!response.ok) throw new Error(result.error || 'No se pudieron cargar los comentarios.')
-      const commentsText = (result.comments || []).map((comment) => `@${(comment.username || 'usuario').replace(/^@/, '')}: ${(comment.text || '').replace(/[\r\n]+/g, ' ')}`).join('\n')
+      if (!response.ok || !response.body) {
+        const failure = await response.json().catch(() => ({})) as { error?: string }
+        throw new Error(failure.error || 'No se pudieron cargar los comentarios.')
+      }
+      const result = await readImportStream(response.body, (progress) => {
+        setImportProgress(progress)
+        setStatus(progress.stage === 'search' ? 'Buscando la publicación en Instagram...' : `Cargando comentarios... ${progress.count.toLocaleString('es-AR')}`)
+      })
+      const commentsText = result.comments.map((comment) => `@${(comment.username || 'usuario').replace(/^@/, '')}: ${(comment.text || '').replace(/[\r\n]+/g, ' ')}`).join('\n')
       setRaw(commentsText)
       setWinners([])
       setRollingName('¿LISTOS?')
-      setStatus(`${result.comments?.length || 0} comentarios cargados. Procesalos para actualizar las participaciones.`)
+      const loaded = result.comments.length.toLocaleString('es-AR')
+      setStatus(`${loaded} comentarios cargados.${result.truncated ? ' La publicación tiene más: se cargó el máximo de 10.000.' : ''} Procesalos para actualizar las participaciones.`)
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'No se pudieron cargar los comentarios.')
     } finally {
       setInstagramBusy(false)
+      setImportProgress(null)
     }
   }
 
@@ -178,6 +283,7 @@ export default function App() {
         setWinners((current) => [...current, pendingWinner])
         setPendingWinner(null)
         setDrawing(false)
+        setConfettiKey(Date.now())
         const prizeNumber = winners.length + 1
         setStageTop('✦ GANADOR CONFIRMADO ✦')
         setStageBottom(prizeNumber === config.winnerCount ? 'TODOS LOS PREMIOS FUERON ASIGNADOS' : `PREMIO ${prizeNumber} DE ${config.winnerCount}`)
@@ -250,7 +356,7 @@ export default function App() {
   }
 
   function exportAct() {
-    const source = { raffle: config, comments: parsed.commentsCount, tickets: parsed.tickets.length, uniqueAccounts: parsed.entries.length, winners, exportedAt: new Date().toISOString() }
+    const source = { raffle: config, comments: parsed.commentsCount, tickets: parsed.tickets.length, uniqueAccounts: parsed.entries.length, excludedDuplicates: parsed.excludedDuplicates, excludedByMentions: parsed.excludedByMentions, winners, exportedAt: new Date().toISOString() }
     const blob = new Blob([JSON.stringify(source, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
@@ -292,7 +398,7 @@ export default function App() {
       {view === 'setup' && <>
         <section className="hero"><div><div className="overline">TEAR / CONFIGURACIÓN</div><h1>NUEVO<br /><em>SORTEO.</em></h1></div><p>Premios · Condiciones · Duplicados</p></section>
         <div className="rule" />
-        <section className="stats"><div className="stat"><strong>01</strong><small>Configuración</small></div><div className="stat"><strong>{String(config.winnerCount).padStart(2, '0')}</strong><small>Ganadores</small></div><div className="stat"><strong>{prizeList.length}</strong><small>Premios cargados</small></div><div className="stat"><strong>{config.allowDuplicates ? 'SÍ' : 'NO'}</strong><small>Comentarios repetidos</small></div></section>
+        <section className="stats"><div className="stat"><strong>01</strong><small>Configuración</small></div><div className="stat"><strong>{String(config.winnerCount).padStart(2, '0')}</strong><small>Ganadores</small></div><div className="stat"><strong>{prizeList.length}</strong><small>Premios cargados</small></div><div className="stat"><strong>{duplicatesShort(config)}</strong><small>Comentarios por cuenta</small></div></section>
         <section className="main setup-main">
           <article className="panel">
             <h2>01 / Configuración</h2><p className="sub">Datos del sorteo</p>
@@ -301,7 +407,7 @@ export default function App() {
             <div className="group"><label className="label" htmlFor="post-url">Publicación de Instagram</label><input id="post-url" className="field" value={config.postUrl} onChange={(event) => setConfig({ ...config, postUrl: event.target.value })} placeholder="https://www.instagram.com/p/..." /><p className="note">La conexión de la cuenta se configura en Participantes.</p></div>
             <div className="group"><label className="label" htmlFor="prizes">Premios · uno por línea</label><textarea id="prizes" className="field" rows={4} value={config.prizes} onChange={(event) => setConfig({ ...config, prizes: event.target.value })} placeholder={'1° premio · Álbum + photocards\n2° premio · Gift card TEAR\n3° premio · Pack sorpresa'} /></div>
             <div className="group"><span className="label">Condiciones</span>{(['follow', 'like', 'share', 'mention'] as Requirement[]).map((item) => <label className="switch condition-switch" key={item}><input type="checkbox" checked={config.requirements.includes(item)} onChange={() => toggleRequirement(item)} />{requirementLabels[item]}</label>)}{requiresMentions && <label className="label mention-count" htmlFor="min-mentions">Menciones mínimas por comentario<select id="min-mentions" className="field" value={config.minMentions} onChange={(event) => setConfig({ ...config, minMentions: Number(event.target.value) })}>{[1, 2, 3, 4, 5].map((number) => <option key={number} value={number}>{number}</option>)}</select></label>}</div>
-            <div className="group"><span className="label">Comentarios repetidos</span><div className="buttons"><button className={`btn ${config.allowDuplicates ? 'primary' : ''}`} onClick={() => setConfig({ ...config, allowDuplicates: true })}>Aceptar</button><button className={`btn ${!config.allowDuplicates ? 'primary' : ''}`} onClick={() => setConfig({ ...config, allowDuplicates: false })}>Rechazar</button></div></div>
+            <div className="group"><span className="label">Comentarios repetidos</span><div className="buttons"><button className={`btn ${config.duplicates === 'all' ? 'primary' : ''}`} onClick={() => setConfig({ ...config, duplicates: 'all' })}>Aceptar</button><select className={`btn per-account-select ${config.duplicates === 'limit' ? 'primary' : ''}`} aria-label="Máximo de comentarios por cuenta" value={config.duplicates === 'limit' ? String(config.maxPerAccount) : ''} onChange={(event) => setConfig({ ...config, duplicates: 'limit', maxPerAccount: Number(event.target.value) })}><option value="" disabled>Hasta…</option>{perAccountOptions.map((number) => <option key={number} value={number}>Hasta {number} por cuenta</option>)}</select><button className={`btn ${config.duplicates === 'one' ? 'primary' : ''}`} onClick={() => setConfig({ ...config, duplicates: 'one' })}>Rechazar</button></div></div>
             <p className="hint"><strong>REGLAS:</strong> {config.winnerCount} {config.winnerCount === 1 ? 'ganador' : 'ganadores'} · reposición habilitada · menciones suman chances.</p>
           </article>
           <article className="panel">
@@ -310,7 +416,7 @@ export default function App() {
             <div className="stage setup-stage"><div className="stage-top">{config.title.trim() || 'SORTEO TEAR'}</div><div className="slot">{config.winnerCount}</div><div className="bigline" /><div className="stage-bottom">{config.winnerCount === 1 ? 'GANADOR' : 'GANADORES'}</div></div>
             <p className="label">Premios</p>{prizeList.length ? prizeList.map((prize, index) => <p className="note prize-preview" key={`${prize}-${index}`}><strong>{String(index + 1).padStart(2, '0')}.</strong> {prize}</p>) : <p className="note">Sin premios cargados</p>}
             <p className="label condition-preview-label">Condiciones</p>{config.requirements.length ? config.requirements.map((item) => <p className="note condition-preview" key={item}><Check size={14} /> {item === 'mention' ? `Etiquetar ${config.minMentions} amistades como mínimo` : requirementLabels[item]}</p>) : <p className="note">Sin condiciones adicionales</p>}
-            <p className="note"><strong>Comentarios repetidos:</strong> {config.allowDuplicates ? 'aceptados' : 'rechazados'}.</p>
+            <p className="note"><strong>Comentarios repetidos:</strong> {duplicatesLabel(config)}.</p>
             <div className="buttons setup-actions"><button className="btn" onClick={() => setView('home')}><ArrowLeft size={14} /> Cancelar</button><button className="btn primary" onClick={() => { setRaw(''); setView('entries') }}>CONTINUAR <ArrowUpRight size={14} /></button></div>
           </article>
         </section>
@@ -318,7 +424,7 @@ export default function App() {
       </>}
 
       {view === 'entries' && <>
-        <section className="hero"><div><div className="overline">TEAR STORE / {config.title.trim() || 'SORTEO'}</div><h1>SHOOKY<br /><em>GIVEAWAY.</em></h1></div><p><strong>{String(config.winnerCount).padStart(2, '0')} {config.winnerCount === 1 ? 'GANADOR' : 'GANADORES'}</strong><br />{config.allowDuplicates ? 'Comentarios repetidos aceptados' : 'Un comentario por cuenta'}</p></section>
+        <section className="hero"><div><div className="overline">TEAR STORE / {config.title.trim() || 'SORTEO'}</div><h1>SHOOKY<br /><em>GIVEAWAY.</em></h1></div><p><strong>{String(config.winnerCount).padStart(2, '0')} {config.winnerCount === 1 ? 'GANADOR' : 'GANADORES'}</strong><br />{duplicatesLabel(config)}</p></section>
         <div className="rule" />
         <section className="stats"><div className="stat"><strong>{parsed.commentsCount}</strong><small>Comentarios</small></div><div className="stat"><strong>{parsed.tickets.length}</strong><small>Chances totales</small></div><div className="stat"><strong>{parsed.entries.length}</strong><small>Cuentas únicas</small></div><div className="stat"><strong>{winners.length} / {config.winnerCount}</strong><small>Ganadores</small></div></section>
         <section className="main">
@@ -329,21 +435,23 @@ export default function App() {
               <div className="instagram-account"><Instagram size={17} /><span>{instagram.connected ? `Conectada como @${instagram.username}` : 'Cuenta de Instagram'}</span><i className={instagram.connected ? 'connected' : ''} /></div>
               <div className="buttons instagram-actions">
                 {instagram.connected
-                  ? <><button className="btn primary" disabled={instagramBusy} onClick={() => void loadInstagramComments()}><Instagram size={14} /> {instagramBusy ? 'CARGANDO…' : 'CARGAR COMENTARIOS'}</button><button className="btn tiny" disabled={instagramBusy} onClick={() => void disconnectInstagram()}>Desconectar</button></>
+                  ? <><button className="btn primary" disabled={instagramBusy} onClick={() => void loadInstagramComments()}><Instagram size={14} /> {instagramBusy ? (importProgress?.stage === 'comments' ? `CARGANDO… ${importProgress.count.toLocaleString('es-AR')}` : 'CARGANDO…') : 'CARGAR COMENTARIOS'}</button><button className="btn tiny" disabled={instagramBusy} onClick={() => void disconnectInstagram()}>Desconectar</button></>
                   : <button className="btn primary" disabled={instagramBusy} onClick={connectInstagram}><Instagram size={14} /> {instagramBusy ? 'ESPERANDO…' : 'CONECTAR INSTAGRAM'}</button>}
               </div>
+              {importProgress && <div className="import-progress" role="status"><span className="spinner" aria-hidden="true" /><span>{importProgress.stage === 'search' ? 'Buscando la publicación…' : `Cargando comentarios… ${importProgress.count.toLocaleString('es-AR')}`}</span></div>}
               <p className="note">Instagram profesional · autorización oficial de Meta. El token queda cifrado en una cookie HttpOnly.</p>
             </div>
             <div className="group"><label className="label" htmlFor="comments">Comentarios · uno por línea</label><textarea id="comments" className="field" rows={8} spellCheck={false} value={raw} disabled={drawing} onChange={(event) => { setRaw(event.target.value); setWinners([]); setRollingName('¿LISTOS?'); setStatus('Procesá los comentarios para actualizar el ranking.') }} placeholder="@usuario: texto @mención" /><p className="note">Formato: <strong>@autor: texto con @menciones</strong>. Cada comentario suma una chance y cada mención otra.</p></div>
             <div className="buttons"><button className="btn secondary" disabled={drawing || instagramBusy} onClick={() => { setRaw(example); setTimeout(processComments, 0) }}>Cargar ejemplo</button><button className="btn" disabled={drawing || instagramBusy} onClick={processComments}>Procesar comentarios</button><label className="btn csv-button">Importar CSV<input type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={(event) => { void importCsv(event.target.files?.[0]); event.currentTarget.value = '' }} /></label></div>
-            <div className="hint"><strong>REGLAS:</strong> {requiresMentions ? `mínimo ${config.minMentions} menciones · ` : ''}{config.allowDuplicates ? 'comentarios repetidos aceptados' : 'un comentario válido por cuenta'} · {config.winnerCount} {config.winnerCount === 1 ? 'extracción' : 'extracciones'} con reposición.</div>
+            <div className="hint"><strong>REGLAS:</strong> {requiresMentions ? `mínimo ${config.minMentions} menciones · ` : ''}{duplicatesLabel(config)} · {config.winnerCount} {config.winnerCount === 1 ? 'extracción' : 'extracciones'} con reposición.</div>
+            {(parsed.excludedDuplicates > 0 || parsed.excludedByMentions > 0) && <p className="note excluded-note"><strong>Descartados:</strong> {parsed.excludedDuplicates > 0 ? `${parsed.excludedDuplicates} por superar el máximo de comentarios por cuenta` : ''}{parsed.excludedDuplicates > 0 && parsed.excludedByMentions > 0 ? ' · ' : ''}{parsed.excludedByMentions > 0 ? `${parsed.excludedByMentions} por no tener las menciones mínimas` : ''}. Cambiá la regla de comentarios repetidos para incluirlos.</p>}
             <label className="switch"><input type="checkbox" checked disabled readOnly />Permitir ganadores repetidos (regla fija)</label>
             <button className="btn tiny" disabled={drawing} onClick={resetWinners}><RotateCcw size={13} /> Reiniciar resultados</button>
           </article>
 
           <article className="panel draw-panel">
             <h2>02 / Sorteo</h2><p className="sub">Una extracción por vez. Los tickets vuelven al bolillero.</p>
-            <div className="stage"><div className="stage-top">{stageTop}</div><div className={`slot ${drawing ? 'rolling' : ''} ${winners.length && !drawing ? 'flash' : ''}`} aria-live="polite">{rollingName}</div><div className="bigline" /><div className="stage-bottom">{stageBottom}</div></div>
+            <div className="stage"><div className="stage-top">{stageTop}</div><div className={`slot ${slotSizeClass(rollingName)} ${drawing ? 'rolling' : ''} ${winners.length && !drawing ? 'flash' : ''}`} aria-live="polite">{rollingName}</div><div className="bigline" /><div className="stage-bottom">{stageBottom}</div>{confettiKey !== null && <Confetti key={confettiKey} reduceMotion={Boolean(reduceMotion)} />}</div>
             <button className="btn primary draw" disabled={!parsed.tickets.length || drawing || winners.length >= config.winnerCount} onClick={handleDraw}>{winners.length >= config.winnerCount ? '✓ SORTEO FINALIZADO' : `✦ SORTEAR GANADOR #${winners.length + 1}`}</button>
             <p className="status" aria-live="polite">{status}</p>
             <div className="winners">{Array.from({ length: config.winnerCount }, (_, index) => {

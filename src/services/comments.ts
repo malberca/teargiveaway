@@ -14,7 +14,8 @@ export interface ParsedComments {
 }
 
 export interface CommentRules {
-  allowDuplicates: boolean
+  // How many valid comments each account may have: Infinity accepts all, 1 rejects repeats, N keeps the first N.
+  maxPerAccount: number
   requireMentions: boolean
   minMentions: number
 }
@@ -23,14 +24,14 @@ const commentPattern = /^\s*(@[\p{L}\p{N}._]+)\s*:\s*(.*)$/u
 const mentionPattern = /@[\p{L}\p{N}._]+/gu
 
 export function parseComments(input: string, rules: CommentRules = {
-  allowDuplicates: true,
+  maxPerAccount: Number.POSITIVE_INFINITY,
   requireMentions: false,
   minMentions: 1,
 }): ParsedComments {
   const byUser = new Map<string, Participant>()
   const tickets: string[] = []
   const errors: string[] = []
-  const acceptedUsers = new Set<string>()
+  const acceptedByUser = new Map<string, number>()
   let commentsCount = 0
   let excludedDuplicates = 0
   let excludedByMentions = 0
@@ -50,7 +51,8 @@ export function parseComments(input: string, rules: CommentRules = {
       excludedByMentions += 1
       return
     }
-    if (!rules.allowDuplicates && acceptedUsers.has(username)) {
+    // The first N valid comments of each account count, in the order they were imported.
+    if ((acceptedByUser.get(username) ?? 0) >= rules.maxPerAccount) {
       excludedDuplicates += 1
       return
     }
@@ -58,7 +60,7 @@ export function parseComments(input: string, rules: CommentRules = {
     const participant = byUser.get(username) ?? { id: username, username, chances: 0 }
     participant.chances += chances
     byUser.set(username, participant)
-    acceptedUsers.add(username)
+    acceptedByUser.set(username, (acceptedByUser.get(username) ?? 0) + 1)
     commentsCount += 1
     for (let chance = 0; chance < chances; chance += 1) tickets.push(username)
   })
