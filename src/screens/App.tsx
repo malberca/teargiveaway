@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ArrowUpRight, Check, Instagram, Plus, RotateCcw, Ticket, Upload } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, Check, Instagram, Plus, RotateCcw, Upload } from 'lucide-react'
 import { useReducedMotion } from 'motion/react'
 import { parseComments } from '../services/comments'
 import { drawWinners, type Winner } from '../logic/draw'
 import Confetti from '../components/Confetti'
+import RaffleHistory from '../components/RaffleHistory'
+import { addRaffle, buildFinishedRaffle, formatWinnersText, HISTORY_KEY, makeId, parseHistory, removeRaffle, sha256Hex, type FinishedRaffle } from '../services/raffles'
 import { parseSavedState, STORAGE_KEY, type SavedState } from '../services/savedState'
 
 const example = [
@@ -106,6 +108,10 @@ function slotSizeClass(name: string): string {
   return name.length > 14 ? 'slot-long' : ''
 }
 
+function loadHistory(): FinishedRaffle[] {
+  try { return parseHistory(window.localStorage.getItem(HISTORY_KEY)) } catch { return [] }
+}
+
 function loadSavedState(): SavedState | null {
   try { return parseSavedState(window.localStorage.getItem(STORAGE_KEY), emptyConfig) } catch { return null }
 }
@@ -168,6 +174,13 @@ export default function App() {
     const timer = window.setTimeout(() => setConfettiKey(null), 7000)
     return () => window.clearTimeout(timer)
   }, [confettiKey])
+  // "Mis sorteos": finished raffles, kept in this browser.
+  const [history, setHistory] = useState<FinishedRaffle[]>(loadHistory)
+  const [confirmingFinish, setConfirmingFinish] = useState(false)
+  const [homeNotice, setHomeNotice] = useState('')
+  useEffect(() => {
+    try { window.localStorage.setItem(HISTORY_KEY, JSON.stringify(history)) } catch { setHomeNotice('No se pudo guardar el historial en este navegador (sin espacio o bloqueado).') }
+  }, [history])
   // Saved shortly after every change, and immediately when the page is refreshed or closed.
   const latest = useRef<SavedState>({ view, config, raw, winners })
   latest.current = { view, config, raw, winners }
@@ -301,6 +314,8 @@ export default function App() {
     setStageTop('TODO LISTO PARA ARRANCAR')
     setStageBottom(`${emptyConfig.winnerCount} PREMIOS · INFINITAS POSIBILIDADES`)
     setStatus('Cargá participantes para empezar.')
+    setHomeNotice('')
+    setConfirmingFinish(false)
     setView('setup')
   }
 
@@ -355,17 +370,21 @@ export default function App() {
     setTimeout(() => setStatus('Archivo cargado. Procesá los comentarios para continuar.'), 0)
   }
 
-  function exportAct() {
-    const source = { raffle: config, comments: parsed.commentsCount, tickets: parsed.tickets.length, uniqueAccounts: parsed.entries.length, excludedDuplicates: parsed.excludedDuplicates, excludedByMentions: parsed.excludedByMentions, winners, exportedAt: new Date().toISOString() }
-    const blob = new Blob([JSON.stringify(source, null, 2)], { type: 'application/json' })
+  function downloadJson(filename: string, data: unknown) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `TEAR-acta-sorteo-${new Date().toISOString().slice(0, 10)}.json`
+    anchor.download = filename
     document.body.append(anchor)
     anchor.click()
     anchor.remove()
     setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  function exportAct() {
+    const source = { raffle: config, comments: parsed.commentsCount, tickets: parsed.tickets.length, uniqueAccounts: parsed.entries.length, excludedDuplicates: parsed.excludedDuplicates, excludedByMentions: parsed.excludedByMentions, winners, exportedAt: new Date().toISOString() }
+    downloadJson(`TEAR-acta-sorteo-${new Date().toISOString().slice(0, 10)}.json`, source)
   }
 
   async function copyWinners() {
@@ -375,6 +394,54 @@ export default function App() {
     } catch {
       setStatus('No se pudo copiar. Usá Exportar acta.')
     }
+  }
+
+  // Archives the raffle in "Mis sorteos" and clears the draft, so a refresh does not bring it back.
+  async function finishRaffle() {
+    if (!winners.length || drawing) return
+    const fingerprint = await sha256Hex(raw)
+    const raffle = buildFinishedRaffle({ id: makeId(), now: new Date(), config, parsed, winners, prizes: prizeList, fingerprint })
+    setHistory((current) => addRaffle(current, raffle))
+    setConfig({ ...emptyConfig })
+    setRaw('')
+    setWinners([])
+    setRollingName('¿LISTOS?')
+    setStageTop('TODO LISTO PARA ARRANCAR')
+    setStageBottom(`${emptyConfig.winnerCount} PREMIOS · INFINITAS POSIBILIDADES`)
+    setStatus('Cargá participantes para empezar.')
+    setConfettiKey(null)
+    setConfirmingFinish(false)
+    setHomeNotice(`✓ Sorteo «${raffle.title || 'sin título'}» guardado en Mis sorteos.`)
+    setView('home')
+  }
+
+  // With every prize assigned it finishes right away; otherwise it asks first.
+  function requestFinish() {
+    if (!winners.length || drawing) return
+    if (winners.length < config.winnerCount) {
+      setConfirmingFinish(true)
+      return
+    }
+    void finishRaffle()
+  }
+
+  function exportRaffle(raffle: FinishedRaffle) {
+    const slug = (raffle.title || 'sorteo').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'sorteo'
+    downloadJson(`TEAR-acta-${slug}-${raffle.finishedAt.slice(0, 10)}.json`, raffle)
+  }
+
+  async function copyRaffle(raffle: FinishedRaffle) {
+    try {
+      await navigator.clipboard.writeText(formatWinnersText(raffle))
+      setHomeNotice('Ganadores copiados.')
+    } catch {
+      setHomeNotice('No se pudo copiar. Usá Acta JSON.')
+    }
+  }
+
+  function deleteRaffle(id: string) {
+    setHistory((current) => removeRaffle(current, id))
+    setHomeNotice('Sorteo eliminado.')
   }
 
   const ranked = [...parsed.entries].sort((left, right) => right.chances - left.chances || left.username.localeCompare(right.username))
@@ -390,8 +457,8 @@ export default function App() {
       {view === 'home' && <>
         <section className="hero home-hero"><div><div className="overline">TEAR STORE / SORTEOS</div><h1>SHOOKY<br /><em>GIVEAWAY.</em></h1></div><p className="hero-specs"><strong>1–20 GANADORES</strong><br />Carga manual · Selección criptográfica</p></section>
         <div className="rule" />
-        <section className="stats"><div className="stat"><strong>0</strong><small>Sorteos creados</small></div><div className="stat"><strong>1–20</strong><small>Ganadores por sorteo</small></div><div className="stat"><strong>∞</strong><small>Chances posibles</small></div><div className="stat"><strong>LOCAL</strong><small>Estado</small></div></section>
-        <section className="main home-main"><article className="panel"><h2>01 / Mis sorteos</h2><p className="sub">Sorteos creados en esta sesión</p><div className="empty-raffles"><Ticket size={23} /><span>Sin sorteos</span><button className="btn primary" onClick={startNew}><Plus size={15} /> NEW</button></div></article><article className="panel"><h2>02 / Reglas</h2><p className="sub">Condiciones configurables</p><p className="note"><strong>Participaciones:</strong> un ticket por comentario y uno por cada mención. Los comentarios repetidos se pueden permitir o rechazar.</p><p className="note"><strong>Ganadores:</strong> cantidad configurable por sorteo. Una cuenta puede ganar más de una vez.</p></article></section>
+        <section className="stats"><div className="stat"><strong>{history.length.toLocaleString('es-AR')}</strong><small>Sorteos guardados</small></div><div className="stat"><strong>1–20</strong><small>Ganadores por sorteo</small></div><div className="stat"><strong>∞</strong><small>Chances posibles</small></div><div className="stat"><strong>LOCAL</strong><small>Estado</small></div></section>
+        <section className="main home-main"><article className="panel"><h2>01 / Mis sorteos</h2><p className="sub">Sorteos finalizados · se guardan en este navegador</p>{homeNotice && <p className="status" role="status" aria-live="polite">{homeNotice}</p>}<RaffleHistory raffles={history} onNew={startNew} onExport={exportRaffle} onCopy={(raffle) => { void copyRaffle(raffle) }} onDelete={deleteRaffle} /></article><article className="panel"><h2>02 / Reglas</h2><p className="sub">Condiciones configurables</p><p className="note"><strong>Participaciones:</strong> un ticket por comentario y uno por cada mención. Los comentarios repetidos se pueden permitir o rechazar.</p><p className="note"><strong>Ganadores:</strong> cantidad configurable por sorteo. Una cuenta puede ganar más de una vez.</p></article></section>
         <section className="bottom"><article className="panel"><h2>03 / Módulos</h2><p className="sub">Configuración · Participantes · Sorteo · Ranking</p><button className="btn primary" onClick={startNew}><Plus size={15} /> NEW</button></article><TransparencyPanel /></section>
       </>}
 
@@ -452,13 +519,14 @@ export default function App() {
           <article className="panel draw-panel">
             <h2>02 / Sorteo</h2><p className="sub">Una extracción por vez. Los tickets vuelven al bolillero.</p>
             <div className="stage"><div className="stage-top">{stageTop}</div><div className={`slot ${slotSizeClass(rollingName)} ${drawing ? 'rolling' : ''} ${winners.length && !drawing ? 'flash' : ''}`} aria-live="polite">{rollingName}</div><div className="bigline" /><div className="stage-bottom">{stageBottom}</div>{confettiKey !== null && <Confetti key={confettiKey} reduceMotion={Boolean(reduceMotion)} />}</div>
-            <button className="btn primary draw" disabled={!parsed.tickets.length || drawing || winners.length >= config.winnerCount} onClick={handleDraw}>{winners.length >= config.winnerCount ? '✓ SORTEO FINALIZADO' : `✦ SORTEAR GANADOR #${winners.length + 1}`}</button>
+            <button className="btn primary draw" disabled={!parsed.tickets.length || drawing || winners.length >= config.winnerCount} onClick={handleDraw}>{winners.length >= config.winnerCount ? '✓ PREMIOS ASIGNADOS' : `✦ SORTEAR GANADOR #${winners.length + 1}`}</button>
             <p className="status" aria-live="polite">{status}</p>
             <div className="winners">{Array.from({ length: config.winnerCount }, (_, index) => {
               const winner = winners[index]
               return <div className={`winner ${winner ? 'full' : ''}`} key={index}><b>PREMIO 0{index + 1}</b><span>{winner?.username || '—'}</span>{winner && prizeList[index] && <small>{prizeList[index]}</small>}</div>
             })}</div>
-            <div className="buttons result-actions"><button className="btn tiny" disabled={!winners.length} onClick={exportAct}><Upload size={13} /> Exportar acta JSON</button><button className="btn tiny" disabled={!winners.length} onClick={() => { void copyWinners() }}>Copiar ganadores</button></div>
+            <div className="buttons result-actions"><button className="btn tiny" disabled={!winners.length} onClick={exportAct}><Upload size={13} /> Exportar acta JSON</button><button className="btn tiny" disabled={!winners.length} onClick={() => { void copyWinners() }}>Copiar ganadores</button><button className="btn primary tiny finish-button" disabled={!winners.length || drawing} onClick={requestFinish}><Check size={13} /> FINALIZAR Y GUARDAR</button></div>
+            {confirmingFinish && <div className="finish-confirm" role="group" aria-label="Confirmar finalización"><p>Se sortearon {winners.length} de {config.winnerCount} premios. ¿Finalizar y guardar igual?</p><div className="buttons"><button className="btn primary tiny" onClick={() => { void finishRaffle() }}>SÍ, FINALIZAR</button><button className="btn tiny" onClick={() => setConfirmingFinish(false)}>SEGUIR SORTEANDO</button></div></div>}
           </article>
         </section>
         <section className="bottom">
