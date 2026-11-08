@@ -6,3 +6,9 @@ INSTAGRAM_APP_SECRET=
 INSTAGRAM_REDIRECT_URI=https://YOUR-HTTPS-TUNNEL.trycloudflare.com/api/instagram/callback
 INSTAGRAM_SESSION_KEY=replace-with-64-hex-characters
 INSTAGRAM_GRAPH_VERSION=v27.0
+
+# Modo recomendado: Instagram API con inicio de sesión de Instagram (sin Página ni portfolio).
+# Si estas dos variables están completas, se usa este modo y se ignoran INSTAGRAM_APP_ID, INSTAGRAM_APP_SECRET e INSTAGRAM_CONFIG_ID.
+# Salen de Meta for Developers > tu app > Instagram > Configuración de API con inicio de sesión de Instagram > Business login settings.
+INSTAGRAM_LOGIN_APP_ID=
+INSTAGRAM_LOGIN_APP_SECRET=

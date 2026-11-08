@@ -5,6 +5,9 @@ export interface Env {
   INSTAGRAM_CONFIG_ID?: string
   INSTAGRAM_APP_ID?: string
   INSTAGRAM_APP_SECRET?: string
+  // Instagram API with Instagram Login: when both are set, that mode is used instead of Facebook Login for Business.
+  INSTAGRAM_LOGIN_APP_ID?: string
+  INSTAGRAM_LOGIN_APP_SECRET?: string
   INSTAGRAM_REDIRECT_URI?: string
   INSTAGRAM_SESSION_KEY?: string
   INSTAGRAM_GRAPH_VERSION?: string

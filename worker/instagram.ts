@@ -1,4 +1,14 @@
 import type { Env } from './index'
+import { describeResolution, redactDetail, resolutionFailureMessage, resolveInstagramAccount } from './instagramAccount'
+import {
+  buildAuthorizeUrl,
+  cleanAuthorizationCode,
+  describeTokenError,
+  INSTAGRAM_GRAPH_ROOT,
+  INSTAGRAM_TOKEN_URL,
+  parseLongLivedToken,
+  parseShortLivedToken,
+} from './instagramLogin'
 
 const GRAPH_ROOT = 'https://graph.facebook.com'
 const OAUTH_ROOT = 'https://www.facebook.com/v27.0/dialog/oauth'
@@ -10,6 +20,8 @@ interface InstagramSession {
   accountId: string
   username: string
   expiresAt: number
+  // Sessions created before the Instagram Login mode existed have no mode and are Facebook sessions.
+  mode?: 'instagram' | 'facebook'
 }
 
 interface MetaError {
@@ -45,6 +57,7 @@ interface MetaPage<T> {
   paging?: { next?: string }
 }
 
+// Never answer a provider failure with 502/504: Cloudflare replaces those origin responses with its own error page, so the app would never see the message.
 function responseError(message: string, status = 400): Response {
   return Response.json({ error: message }, { status })
 }
@@ -108,20 +121,35 @@ function redirectUri(request: Request, env: Env): string {
   return env.INSTAGRAM_REDIRECT_URI || new URL('/api/instagram/callback', request.url).toString()
 }
 
-function graphApiUrl(path: string, env: Env): URL {
+// "instagram" = Instagram API with Instagram Login (needs INSTAGRAM_LOGIN_APP_ID/SECRET). Otherwise Facebook Login for Business.
+function loginMode(env: Env): 'instagram' | 'facebook' {
+  return env.INSTAGRAM_LOGIN_APP_ID && env.INSTAGRAM_LOGIN_APP_SECRET ? 'instagram' : 'facebook'
+}
+
+function graphApiUrl(path: string, env: Env, root = GRAPH_ROOT): URL {
   const version = env.INSTAGRAM_GRAPH_VERSION || 'v27.0'
   if (!/^v\d+\.0$/.test(version)) throw new Error('INSTAGRAM_GRAPH_VERSION must look like v27.0.')
-  return new URL(`${GRAPH_ROOT}/${version}/${path.replace(/^\//, '')}`)
+  return new URL(`${root}/${version}/${path.replace(/^\//, '')}`)
 }
 
 function popupResponse(request: Request, result: 'connected' | 'error', message = ''): Response {
   const origin = JSON.stringify(new URL(request.url).origin)
   const payload = JSON.stringify({ type: 'tear-instagram-oauth', result, message })
-  const html = `<!doctype html><meta charset="utf-8"><title>Instagram · TEAR</title><p>${result === 'connected' ? 'Cuenta conectada. Esta ventana se cerrará.' : 'No se pudo conectar Instagram. Volvé a TEAR e intentá de nuevo.'}</p><script>if(window.opener){window.opener.postMessage(${payload},${origin});window.close()}</script>`
+  const escaped = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // On errors the window stays open and shows the reason, so it can be read even if the opener misses the message.
+  const body = result === 'connected'
+    ? '<p>Cuenta conectada. Esta ventana se cerrará.</p>'
+    : `<p>No se pudo conectar Instagram. Volvé a TEAR e intentá de nuevo.</p><pre style="white-space:pre-wrap;font:13px/1.4 ui-monospace,monospace">${escaped}</pre>`
+  const closeScript = result === 'connected' ? 'window.close()' : ''
+  const html = `<!doctype html><meta charset="utf-8"><title>Instagram · TEAR</title>${body}<script>if(window.opener){window.opener.postMessage(${payload},${origin});${closeScript}}</script>`
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } })
 }
 
+// Last callback outcome, kept in memory only and readable from this machine (see /api/instagram/debug-last). Messages are already redacted.
+let lastCallback: { at: string; result: string; status: number; message: string } | null = null
+
 async function popupResult(request: Request, result: 'connected' | 'error', message: string, status = 200, cookies: string[] = []): Promise<Response> {
+  if (new URL(request.url).pathname === '/api/instagram/callback') lastCallback = { at: new Date().toISOString(), result, status, message }
   const headers = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' })
   for (const value of cookies) headers.append('Set-Cookie', value)
   return new Response(await popupResponse(request, result, message).text(), { status, headers })
@@ -133,7 +161,7 @@ async function readSession(request: Request, env: Env): Promise<InstagramSession
 }
 
 async function graphJson<T>(url: URL): Promise<T> {
-  if (url.origin !== GRAPH_ROOT) throw new Error('Instagram returned an invalid pagination URL.')
+  if (url.origin !== GRAPH_ROOT && url.origin !== INSTAGRAM_GRAPH_ROOT) throw new Error('Instagram returned an invalid pagination URL.')
   const response = await fetch(url)
   const body = await response.json() as T & MetaError
   if (!response.ok || body.error) {
@@ -141,6 +169,12 @@ async function graphJson<T>(url: URL): Promise<T> {
     throw new Error(meta?.message || 'Instagram API request failed.')
   }
   return body
+}
+
+async function graphRequest(path: string, params: Record<string, string>, env: Env): Promise<unknown> {
+  const url = graphApiUrl(path, env)
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
+  return graphJson<unknown>(url)
 }
 
 function normalizeInstagramPostUrl(value: string): string | null {
@@ -154,11 +188,25 @@ function normalizeInstagramPostUrl(value: string): string | null {
   }
 }
 
-async function fetchPostComments(session: InstagramSession, postUrl: string, env: Env): Promise<{ comments: InstagramComment[]; username: string; permalink: string }> {
+export interface ImportProgress {
+  stage: 'search' | 'comments'
+  count: number
+}
+
+const MAX_MEDIA_PAGES = 20
+const MAX_COMMENT_PAGES = 100
+
+async function fetchPostComments(
+  session: InstagramSession,
+  postUrl: string,
+  env: Env,
+  onProgress?: (progress: ImportProgress) => void,
+): Promise<{ comments: InstagramComment[]; username: string; permalink: string; truncated: boolean }> {
   const target = normalizeInstagramPostUrl(postUrl)
   if (!target) throw new Error('Ingresá un enlace válido de una publicación o reel de Instagram.')
 
-  const mediaUrl = graphApiUrl(`/${session.accountId}/media`, env)
+  const root = session.mode === 'instagram' ? INSTAGRAM_GRAPH_ROOT : GRAPH_ROOT
+  const mediaUrl = graphApiUrl(`/${session.accountId}/media`, env, root)
   mediaUrl.searchParams.set('fields', 'id,permalink')
   mediaUrl.searchParams.set('limit', '100')
   mediaUrl.searchParams.set('access_token', session.accessToken)
@@ -166,34 +214,89 @@ async function fetchPostComments(session: InstagramSession, postUrl: string, env
   let pages = 0
   let next: string | undefined = mediaUrl.toString()
 
-  while (next && pages < 20 && !matchingMedia) {
+  while (next && pages < MAX_MEDIA_PAGES && !matchingMedia) {
     const page: MetaPage<InstagramMedia> = await graphJson<MetaPage<InstagramMedia>>(new URL(next))
     matchingMedia = page.data?.find((item) => normalizeInstagramPostUrl(item.permalink || '') === target)
     next = page.paging?.next
     pages += 1
+    onProgress?.({ stage: 'search', count: pages })
   }
   if (!matchingMedia) throw new Error('No encontramos esa publicación entre las publicaciones accesibles de la cuenta conectada.')
 
   const comments: InstagramComment[] = []
   let commentsUrl: string | undefined
-  const firstUrl = graphApiUrl(`/${encodeURIComponent(matchingMedia.id)}/comments`, env)
+  const firstUrl = graphApiUrl(`/${encodeURIComponent(matchingMedia.id)}/comments`, env, root)
   firstUrl.searchParams.set('fields', 'id,text,username')
   firstUrl.searchParams.set('limit', '100')
   firstUrl.searchParams.set('access_token', session.accessToken)
   commentsUrl = firstUrl.toString()
   let commentPages = 0
-  while (commentsUrl && commentPages < 100) {
+  while (commentsUrl && commentPages < MAX_COMMENT_PAGES) {
     const page: MetaPage<InstagramComment> = await graphJson<MetaPage<InstagramComment>>(new URL(commentsUrl))
     comments.push(...(page.data || []))
     commentsUrl = page.paging?.next
     commentPages += 1
+    onProgress?.({ stage: 'comments', count: comments.length })
   }
+  // Still a next page after the cap: the post has more comments than were loaded.
+  const truncated = Boolean(commentsUrl)
 
-  const accountUrl = graphApiUrl(`/${session.accountId}`, env)
-  accountUrl.searchParams.set('fields', 'id,username')
+  const accountUrl = graphApiUrl(session.mode === 'instagram' ? '/me' : `/${session.accountId}`, env, root)
+  accountUrl.searchParams.set('fields', session.mode === 'instagram' ? 'user_id,username' : 'id,username')
   accountUrl.searchParams.set('access_token', session.accessToken)
   const account = await graphJson<InstagramAccount>(accountUrl)
-  return { comments, username: account.username || session.username, permalink: matchingMedia.permalink || postUrl }
+  return { comments, username: account.username || session.username, permalink: matchingMedia.permalink || postUrl, truncated }
+}
+
+// Instagram API with Instagram Login: the token exchange identifies the professional account, no Page or portfolio involved.
+async function completeInstagramLogin(request: Request, env: Env, code: string, clearState: string): Promise<Response> {
+  try {
+    const clientSecret = env.INSTAGRAM_LOGIN_APP_SECRET!
+    const exchange = await fetch(INSTAGRAM_TOKEN_URL, {
+      method: 'POST',
+      body: new URLSearchParams({
+        client_id: env.INSTAGRAM_LOGIN_APP_ID!,
+        client_secret: clientSecret,
+        grant_type: 'authorization_code',
+        redirect_uri: redirectUri(request, env),
+        code: cleanAuthorizationCode(code),
+      }),
+    })
+    const exchangeBody: unknown = await exchange.json().catch(() => ({}))
+    if (!exchange.ok) throw new Error(describeTokenError(exchangeBody))
+    const short = parseShortLivedToken(exchangeBody)
+
+    // Prefer the 60-day token; the browser session is still capped below.
+    let accessToken = short.accessToken
+    let expiresIn = short.expiresIn
+    try {
+      const longUrl = new URL(`${INSTAGRAM_GRAPH_ROOT}/access_token`)
+      longUrl.searchParams.set('grant_type', 'ig_exchange_token')
+      longUrl.searchParams.set('client_secret', clientSecret)
+      longUrl.searchParams.set('access_token', short.accessToken)
+      const long = parseLongLivedToken(await graphJson<unknown>(longUrl))
+      if (long) { accessToken = long.accessToken; expiresIn = long.expiresIn }
+    } catch (error) {
+      console.error('Instagram long-lived token exchange failed:', redactDetail(error instanceof Error ? error.message : 'unknown error'))
+    }
+
+    const meUrl = graphApiUrl('/me', env, INSTAGRAM_GRAPH_ROOT)
+    meUrl.searchParams.set('fields', 'user_id,username')
+    meUrl.searchParams.set('access_token', accessToken)
+    const me = await graphJson<InstagramAccount>(meUrl)
+    // `/me` returns the id as a string; the exchange returns it as a number that JavaScript rounds.
+    const accountId = String(me.user_id ?? short.userId)
+    if (!accountId || accountId === 'undefined') throw new Error('Instagram no devolvió el identificador de la cuenta.')
+    console.info('Instagram Login: account connected as', me.username || '(sin username)')
+
+    const sessionMaxAge = Math.min(expiresIn, 86400)
+    const session = await encryptSession({ accessToken, accountId, username: me.username || 'Instagram', expiresAt: Date.now() + sessionMaxAge * 1000, mode: 'instagram' }, env)
+    return popupResult(request, 'connected', '', 200, [cookie(SESSION_COOKIE, session, request, sessionMaxAge), clearState])
+  } catch (error) {
+    const safeDetail = redactDetail(error instanceof Error ? error.message : 'Unknown error')
+    console.error('Instagram Login callback failed:', safeDetail)
+    return popupResult(request, 'error', `Instagram rechazó el inicio de sesión: ${safeDetail}`, 424, [clearState])
+  }
 }
 
 export async function handleInstagramRequest(request: Request, env: Env): Promise<Response> {
@@ -201,20 +304,33 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
   const method = request.method.toUpperCase()
 
   if (url.pathname === '/api/instagram/connect' && method === 'GET') {
-    if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET) return popupResult(request, 'error', 'Falta configurar la app de Instagram en .dev.vars.', 503)
+    const mode = loginMode(env)
+    if (mode === 'facebook' && (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET)) return popupResult(request, 'error', 'Falta configurar la app de Instagram en .dev.vars.', 503)
     try { await encryptionKey(env) } catch { return popupResult(request, 'error', 'Configurá INSTAGRAM_SESSION_KEY en .dev.vars antes de conectar.', 503) }
-    if (!env.INSTAGRAM_CONFIG_ID) return popupResult(request, 'error', 'Falta configurar INSTAGRAM_CONFIG_ID.', 503)
+    if (mode === 'facebook' && !env.INSTAGRAM_CONFIG_ID) return popupResult(request, 'error', 'Falta configurar INSTAGRAM_CONFIG_ID.', 503)
+    // Meta only accepts HTTPS callbacks; opening the app from 127.0.0.1 would end in Meta's generic "insecure connection" page.
+    const callback = redirectUri(request, env)
+    let callbackProtocol = ''
+    try { callbackProtocol = new URL(callback).protocol } catch { /* Reported below. */ }
+    if (callbackProtocol !== 'https:') {
+      return popupResult(request, 'error', 'Meta exige un callback HTTPS. Abrí la app desde la URL https del túnel (no desde 127.0.0.1) o configurá INSTAGRAM_REDIRECT_URI.', 400)
+    }
     const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)))
-    const authorize = new URL(OAUTH_ROOT)
-    authorize.searchParams.set('client_id', env.INSTAGRAM_APP_ID)
-    authorize.searchParams.set('redirect_uri', redirectUri(request, env))
-    authorize.searchParams.set('response_type', 'code')
-    authorize.searchParams.set('config_id', env.INSTAGRAM_CONFIG_ID)
-    authorize.searchParams.set('state', state)
+    let authorize: URL
+    if (mode === 'instagram') {
+      authorize = buildAuthorizeUrl({ clientId: env.INSTAGRAM_LOGIN_APP_ID!, redirectUri: callback, state })
+    } else {
+      authorize = new URL(OAUTH_ROOT)
+      authorize.searchParams.set('client_id', env.INSTAGRAM_APP_ID!)
+      authorize.searchParams.set('redirect_uri', callback)
+      authorize.searchParams.set('response_type', 'code')
+      authorize.searchParams.set('config_id', env.INSTAGRAM_CONFIG_ID!)
+      authorize.searchParams.set('state', state)
+    }
     return new Response(null, { status: 302, headers: {
       Location: authorize.toString(),
       'Cache-Control': 'no-store',
-      'Set-Cookie': cookie(STATE_COOKIE, state, request, 600),
+      'Set-Cookie': cookie(STATE_COOKIE, state, request, 1800),
     } })
   }
 
@@ -225,9 +341,14 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
     const providerError = url.searchParams.get('error_description') || url.searchParams.get('error')
     const clearState = cookie(STATE_COOKIE, '', request, 0)
     if (providerError) return popupResult(request, 'error', 'Autorización cancelada.', 200, [clearState])
-    if (!state || !stateCookie || state !== stateCookie || !code) {
-      return popupResult(request, 'error', 'La autorización venció.', 400, [clearState])
+    if (!code) return popupResult(request, 'error', 'Meta no devolvió el código de autorización.', 400, [clearState])
+    if (!stateCookie) {
+      return popupResult(request, 'error', 'No llegó la cookie de seguridad del login: venció (30 min), se abrió otra ventana de login o se recargó esta página. Cerrá esta ventana y tocá "Conectar Instagram" una sola vez.', 400, [clearState])
     }
+    if (!state || state !== stateCookie) {
+      return popupResult(request, 'error', 'Hay otro login de Instagram en curso: el estado no coincide. Cerrá las otras ventanas de login e intentá de nuevo.', 400, [clearState])
+    }
+    if (loginMode(env) === 'instagram') return completeInstagramLogin(request, env, code, clearState)
     if (!env.INSTAGRAM_APP_ID || !env.INSTAGRAM_APP_SECRET) return popupResult(request, 'error', 'Falta configurar la app de Instagram en .dev.vars.', 503, [clearState])
     try {
       const tokenUrl = graphApiUrl('/oauth/access_token', env)
@@ -237,38 +358,34 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
       tokenUrl.searchParams.set('code', code)
       const token = await graphJson<MetaToken>(tokenUrl)
       if (!token.access_token) throw new Error('Meta no devolvió un token de acceso.')
-      let account: InstagramAccount | undefined
-      if (token.user_id) {
-        const accountUrl = graphApiUrl(`/${encodeURIComponent(String(token.user_id))}`, env)
-        accountUrl.searchParams.set('fields', 'id,username')
-        accountUrl.searchParams.set('access_token', token.access_token)
-        try { account = await graphJson<InstagramAccount>(accountUrl) } catch { /* Fall back to the assigned account list. */ }
-      }
-      if (!account?.id) {
-        const accountsUrl = graphApiUrl('/me/assigned_instagram_accounts', env)
-        accountsUrl.searchParams.set('fields', 'id,username')
-        accountsUrl.searchParams.set('access_token', token.access_token)
-        const accounts = await graphJson<MetaPage<InstagramAccount>>(accountsUrl)
-        const assigned = accounts.data || []
-        account = (token.user_id && assigned.find((candidate) => String(candidate.id) === String(token.user_id)))
-          || (assigned.length === 1 ? assigned[0] : undefined)
-      }
-      if (!account?.id) {
-        throw new Error('Seleccioná exactamente una cuenta de Instagram al autorizar la app.')
+      const resolution = await resolveInstagramAccount({
+        graph: (path, params) => graphRequest(path, params, env),
+        accessToken: token.access_token,
+        appToken: `${env.INSTAGRAM_APP_ID}|${env.INSTAGRAM_APP_SECRET}`,
+        tokenUserId: token.user_id,
+      })
+      // Strategy report only: counts and notes, never tokens.
+      console.info('Instagram account resolution:', describeResolution(resolution))
+      const account = resolution.account
+      if (!account) {
+        return popupResult(request, 'error', resolutionFailureMessage(resolution), 422, [clearState])
       }
       // Limit the browser session even when the provider token has no expiry.
       const sessionMaxAge = Math.min(token.expires_in && token.expires_in > 0 ? token.expires_in : 86400, 86400)
       const expiresAt = Date.now() + sessionMaxAge * 1000
-      const session = await encryptSession({ accessToken: token.access_token, accountId: String(account.id), username: account.username || 'Instagram', expiresAt }, env)
+      const session = await encryptSession({ accessToken: token.access_token, accountId: account.id, username: account.username || 'Instagram', expiresAt }, env)
       return popupResult(request, 'connected', '', 200, [cookie(SESSION_COOKIE, session, request, sessionMaxAge), clearState])
     } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Unknown error'
-      const safeDetail = detail
-        .replace(/([?&](?:access_token|client_secret|code)=)[^&\s]+/gi, '$1[redacted]')
-        .replace(/\b[A-Za-z0-9_-]{64,}\b/g, '[redacted]')
+      const safeDetail = redactDetail(error instanceof Error ? error.message : 'Unknown error')
       console.error('Instagram OAuth callback failed:', safeDetail)
-      return popupResult(request, 'error', 'Falló el intercambio OAuth. Revisá la app de Meta, el callback y los permisos.', 502, [clearState])
+      return popupResult(request, 'error', `Meta rechazó el intercambio OAuth: ${safeDetail}`, 424, [clearState])
     }
+  }
+
+  if (url.pathname === '/api/instagram/debug-last' && method === 'GET') {
+    // Local only: through the tunnel the hostname is the public one and this route does not exist.
+    if (!['127.0.0.1', 'localhost'].includes(url.hostname)) return responseError('Ruta de Instagram no encontrada.', 404)
+    return Response.json(lastCallback ?? { none: true }, { headers: { 'Cache-Control': 'no-store' } })
   }
 
   if (url.pathname === '/api/instagram/status' && method === 'GET') {
@@ -283,15 +400,35 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
   if (url.pathname === '/api/instagram/comments' && method === 'POST') {
     const session = await readSession(request, env)
     if (!session) return responseError('Conectá una cuenta profesional de Instagram primero.', 401)
-    let body: { postUrl?: string }
-    try { body = await request.json() as { postUrl?: string } } catch { return responseError('El cuerpo de la solicitud no es válido.') }
+    let body: { postUrl?: string; stream?: boolean }
+    try { body = await request.json() as { postUrl?: string; stream?: boolean } } catch { return responseError('El cuerpo de la solicitud no es válido.') }
     if (!body.postUrl) return responseError('Falta el enlace de la publicación.')
+    if (body.stream) {
+      // Progress as newline-delimited JSON, so a 7,000-comment import shows a live counter instead of a silent wait.
+      if (!normalizeInstagramPostUrl(body.postUrl)) return responseError('Ingresá un enlace válido de una publicación o reel de Instagram.')
+      const postUrl = body.postUrl
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+          try {
+            const result = await fetchPostComments(session, postUrl, env, (progress) => send({ type: 'progress', ...progress }))
+            send({ type: 'done', ...result })
+          } catch (error) {
+            send({ type: 'error', message: redactDetail(error instanceof Error ? error.message : 'No se pudieron cargar los comentarios.') })
+          } finally {
+            controller.close()
+          }
+        },
+      })
+      return new Response(stream, { headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' } })
+    }
     try {
       const result = await fetchPostComments(session, body.postUrl, env)
       return Response.json(result, { headers: { 'Cache-Control': 'no-store' } })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'No se pudieron cargar los comentarios.'
-      return responseError(message, 502)
+      return responseError(message, 424)
     }
   }
 
