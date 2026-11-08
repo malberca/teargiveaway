@@ -250,8 +250,12 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
       const expiresAt = Date.now() + sessionMaxAge * 1000
       const session = await encryptSession({ accessToken: token.access_token, accountId: String(account.id), username: account.username || 'Instagram', expiresAt }, env)
       return popupResult(request, 'connected', '', 200, [cookie(SESSION_COOKIE, session, request, sessionMaxAge), clearState])
-    } catch {
-      console.error('Instagram OAuth callback failed.')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Unknown error'
+      const safeDetail = detail
+        .replace(/([?&](?:access_token|client_secret|code)=)[^&\s]+/gi, '$1[redacted]')
+        .replace(/\b[A-Za-z0-9_-]{64,}\b/g, '[redacted]')
+      console.error('Instagram OAuth callback failed:', safeDetail)
       return popupResult(request, 'error', 'Falló el intercambio OAuth. Revisá la app de Meta, el callback y los permisos.', 502, [clearState])
     }
   }
