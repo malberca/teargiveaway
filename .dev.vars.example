@@ -1,2 +1,8 @@
-# Variables locales de ejemplo. No agregues credenciales reales a este archivo.
-# La primera versión de TEAR Sorteos no requiere secretos ni conexión con Instagram.
+# Copiá a .dev.vars y completá con valores de tu propia app de Meta.
+# Nunca pegues credenciales reales en este archivo ni lo subas a Git.
+INSTAGRAM_CONFIG_ID=
+INSTAGRAM_APP_ID=
+INSTAGRAM_APP_SECRET=
+INSTAGRAM_REDIRECT_URI=https://YOUR-HTTPS-TUNNEL.trycloudflare.com/api/instagram/callback
+INSTAGRAM_SESSION_KEY=replace-with-64-hex-characters
+INSTAGRAM_GRAPH_VERSION=v27.0

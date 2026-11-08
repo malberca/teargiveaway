@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, ArrowUpRight, Check, Plus, RotateCcw, Ticket, Upload } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, Check, Instagram, Plus, RotateCcw, Ticket, Upload } from 'lucide-react'
 import { useReducedMotion } from 'motion/react'
 import { parseComments } from '../services/comments'
 import { drawWinners, type Winner } from '../logic/draw'
@@ -30,6 +30,12 @@ interface RaffleConfig {
   allowDuplicates: boolean
   minMentions: number
   requirements: Requirement[]
+}
+
+interface InstagramStatus {
+  connected: boolean
+  username: string | null
+  expiresAt: string | null
 }
 
 const emptyConfig: RaffleConfig = { title: '', postUrl: '', prizes: '', winnerCount: 5, allowDuplicates: true, minMentions: 1, requirements: [] }
@@ -75,6 +81,8 @@ export default function App() {
   const [stageTop, setStageTop] = useState('TODO LISTO PARA ARRANCAR')
   const [stageBottom, setStageBottom] = useState('5 PREMIOS · INFINITAS POSIBILIDADES')
   const [status, setStatus] = useState('Cargá participantes para empezar.')
+  const [instagram, setInstagram] = useState<InstagramStatus>({ connected: false, username: null, expiresAt: null })
+  const [instagramBusy, setInstagramBusy] = useState(false)
   const reduceMotion = useReducedMotion()
   const requiresMentions = config.requirements.includes('mention')
   const parsed = useMemo(() => parseComments(raw, {
@@ -83,6 +91,79 @@ export default function App() {
     minMentions: config.minMentions,
   }), [raw, config.allowDuplicates, requiresMentions, config.minMentions])
   const prizeList = config.prizes.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+
+  async function refreshInstagramStatus() {
+    try {
+      const response = await fetch('/api/instagram/status', { cache: 'no-store' })
+      if (!response.ok) return
+      setInstagram(await response.json() as InstagramStatus)
+    } catch {
+      setInstagram({ connected: false, username: null, expiresAt: null })
+    }
+  }
+
+  useEffect(() => {
+    void refreshInstagramStatus()
+    const onMessage = (event: MessageEvent<{ type?: string; result?: string; message?: string }>) => {
+      if (event.origin !== window.location.origin || event.data?.type !== 'tear-instagram-oauth') return
+      setInstagramBusy(false)
+      if (event.data.result === 'connected') {
+        void refreshInstagramStatus().then(() => setStatus('Instagram conectado. Ya podés cargar los comentarios.'))
+      } else {
+        setStatus(event.data.message || 'No se pudo conectar Instagram.')
+      }
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [])
+
+  function connectInstagram() {
+    const popup = window.open('/api/instagram/connect', 'tear-instagram-oauth', 'popup,width=560,height=720')
+    if (!popup) {
+      setStatus('Permití las ventanas emergentes para conectar Instagram.')
+      return
+    }
+    setInstagramBusy(true)
+    setStatus('Esperando autorización de Instagram...')
+  }
+
+  async function disconnectInstagram() {
+    setInstagramBusy(true)
+    try {
+      await fetch('/api/instagram/disconnect', { method: 'POST' })
+      setInstagram({ connected: false, username: null, expiresAt: null })
+      setStatus('Cuenta de Instagram desconectada.')
+    } finally {
+      setInstagramBusy(false)
+    }
+  }
+
+  async function loadInstagramComments() {
+    if (!config.postUrl.trim()) {
+      setStatus('Pegá el enlace de la publicación en la configuración del sorteo.')
+      return
+    }
+    setInstagramBusy(true)
+    setStatus('Cargando comentarios desde Instagram...')
+    try {
+      const response = await fetch('/api/instagram/comments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ postUrl: config.postUrl }),
+      })
+      const result = await response.json() as { comments?: Array<{ username?: string; text?: string }>; error?: string }
+      if (!response.ok) throw new Error(result.error || 'No se pudieron cargar los comentarios.')
+      const commentsText = (result.comments || []).map((comment) => `@${(comment.username || 'usuario').replace(/^@/, '')}: ${(comment.text || '').replace(/[\r\n]+/g, ' ')}`).join('\n')
+      setRaw(commentsText)
+      setWinners([])
+      setRollingName('¿LISTOS?')
+      setStatus(`${result.comments?.length || 0} comentarios cargados. Procesalos para actualizar las participaciones.`)
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'No se pudieron cargar los comentarios.')
+    } finally {
+      setInstagramBusy(false)
+    }
+  }
 
   useEffect(() => {
     if (!drawing || !pendingWinner || !parsed.tickets.length) return
@@ -217,7 +298,7 @@ export default function App() {
             <h2>01 / Configuración</h2><p className="sub">Datos del sorteo</p>
             <div className="group"><label className="label" htmlFor="raffle-title">Nombre del sorteo</label><input id="raffle-title" className="field" value={config.title} maxLength={70} onChange={(event) => setConfig({ ...config, title: event.target.value })} placeholder="Sorteo TEAR" /></div>
             <div className="group"><label className="label" htmlFor="winner-count">Cantidad de ganadores</label><select id="winner-count" className="field" value={config.winnerCount} onChange={(event) => setConfig({ ...config, winnerCount: Number(event.target.value) })}>{Array.from({ length: 20 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count} {count === 1 ? 'ganador' : 'ganadores'}</option>)}</select></div>
-            <div className="group"><label className="label" htmlFor="post-url">Publicación de Instagram</label><input id="post-url" className="field" value={config.postUrl} onChange={(event) => setConfig({ ...config, postUrl: event.target.value })} placeholder="https://instagram.com/p/..." /><p className="note">Referencia manual · Instagram no está conectado.</p></div>
+            <div className="group"><label className="label" htmlFor="post-url">Publicación de Instagram</label><input id="post-url" className="field" value={config.postUrl} onChange={(event) => setConfig({ ...config, postUrl: event.target.value })} placeholder="https://www.instagram.com/p/..." /><p className="note">La conexión de la cuenta se configura en Participantes.</p></div>
             <div className="group"><label className="label" htmlFor="prizes">Premios · uno por línea</label><textarea id="prizes" className="field" rows={4} value={config.prizes} onChange={(event) => setConfig({ ...config, prizes: event.target.value })} placeholder={'1° premio · Álbum + photocards\n2° premio · Gift card TEAR\n3° premio · Pack sorpresa'} /></div>
             <div className="group"><span className="label">Condiciones</span>{(['follow', 'like', 'share', 'mention'] as Requirement[]).map((item) => <label className="switch condition-switch" key={item}><input type="checkbox" checked={config.requirements.includes(item)} onChange={() => toggleRequirement(item)} />{requirementLabels[item]}</label>)}{requiresMentions && <label className="label mention-count" htmlFor="min-mentions">Menciones mínimas por comentario<select id="min-mentions" className="field" value={config.minMentions} onChange={(event) => setConfig({ ...config, minMentions: Number(event.target.value) })}>{[1, 2, 3, 4, 5].map((number) => <option key={number} value={number}>{number}</option>)}</select></label>}</div>
             <div className="group"><span className="label">Comentarios repetidos</span><div className="buttons"><button className={`btn ${config.allowDuplicates ? 'primary' : ''}`} onClick={() => setConfig({ ...config, allowDuplicates: true })}>Aceptar</button><button className={`btn ${!config.allowDuplicates ? 'primary' : ''}`} onClick={() => setConfig({ ...config, allowDuplicates: false })}>Rechazar</button></div></div>
@@ -244,9 +325,17 @@ export default function App() {
           <article className="panel">
             <h2>01 / Participantes</h2><p className="sub">Pegá comentarios o importá un archivo CSV.</p>
             {config.postUrl && <div className="group"><label className="label" htmlFor="post-url-display">Publicación</label><input id="post-url-display" className="field" value={config.postUrl} readOnly /></div>}
-            <div className="auth"><strong>◎ Modo local</strong><br />La lectura automática de Instagram aún no está conectada.</div>
+            <div className="auth instagram-bridge">
+              <div className="instagram-account"><Instagram size={17} /><span>{instagram.connected ? `Conectada como @${instagram.username}` : 'Cuenta de Instagram'}</span><i className={instagram.connected ? 'connected' : ''} /></div>
+              <div className="buttons instagram-actions">
+                {instagram.connected
+                  ? <><button className="btn primary" disabled={instagramBusy} onClick={() => void loadInstagramComments()}><Instagram size={14} /> {instagramBusy ? 'CARGANDO…' : 'CARGAR COMENTARIOS'}</button><button className="btn tiny" disabled={instagramBusy} onClick={() => void disconnectInstagram()}>Desconectar</button></>
+                  : <button className="btn primary" disabled={instagramBusy} onClick={connectInstagram}><Instagram size={14} /> {instagramBusy ? 'ESPERANDO…' : 'CONECTAR INSTAGRAM'}</button>}
+              </div>
+              <p className="note">Instagram profesional · autorización oficial de Meta. El token queda cifrado en una cookie HttpOnly.</p>
+            </div>
             <div className="group"><label className="label" htmlFor="comments">Comentarios · uno por línea</label><textarea id="comments" className="field" rows={8} spellCheck={false} value={raw} disabled={drawing} onChange={(event) => { setRaw(event.target.value); setWinners([]); setRollingName('¿LISTOS?'); setStatus('Procesá los comentarios para actualizar el ranking.') }} placeholder="@usuario: texto @mención" /><p className="note">Formato: <strong>@autor: texto con @menciones</strong>. Cada comentario suma una chance y cada mención otra.</p></div>
-            <div className="buttons"><button className="btn secondary" disabled={drawing} onClick={() => { setRaw(example); setTimeout(processComments, 0) }}>Cargar ejemplo</button><button className="btn" disabled={drawing} onClick={processComments}>Procesar comentarios</button><label className="btn csv-button">Importar CSV<input type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={(event) => { void importCsv(event.target.files?.[0]); event.currentTarget.value = '' }} /></label></div>
+            <div className="buttons"><button className="btn secondary" disabled={drawing || instagramBusy} onClick={() => { setRaw(example); setTimeout(processComments, 0) }}>Cargar ejemplo</button><button className="btn" disabled={drawing || instagramBusy} onClick={processComments}>Procesar comentarios</button><label className="btn csv-button">Importar CSV<input type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={(event) => { void importCsv(event.target.files?.[0]); event.currentTarget.value = '' }} /></label></div>
             <div className="hint"><strong>REGLAS:</strong> {requiresMentions ? `mínimo ${config.minMentions} menciones · ` : ''}{config.allowDuplicates ? 'comentarios repetidos aceptados' : 'un comentario válido por cuenta'} · {config.winnerCount} {config.winnerCount === 1 ? 'extracción' : 'extracciones'} con reposición.</div>
             <label className="switch"><input type="checkbox" checked disabled readOnly />Permitir ganadores repetidos (regla fija)</label>
             <button className="btn tiny" disabled={drawing} onClick={resetWinners}><RotateCcw size={13} /> Reiniciar resultados</button>

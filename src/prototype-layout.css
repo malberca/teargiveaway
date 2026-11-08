@@ -236,6 +236,29 @@
   line-height: 1.5;
 }
 
+.instagram-bridge {
+  margin: 0 0 20px;
+  padding: 14px 16px;
+  background: #f8f5fb;
+  border: 1px solid #e4d9f2;
+  border-radius: 8px;
+}
+
+.instagram-account {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #241d2b;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.instagram-account svg { color: #8060a8; }
+.instagram-account i { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: #b9b2be; }
+.instagram-account i.connected { background: #5d9a70; }
+.instagram-actions { margin-top: 13px; }
+.instagram-bridge .note { margin-bottom: 0; }
+
 @media (max-width: 900px) {
   .home-hero {
     grid-template-columns: 1fr;
