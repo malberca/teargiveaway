@@ -237,14 +237,25 @@ export async function handleInstagramRequest(request: Request, env: Env): Promis
       tokenUrl.searchParams.set('code', code)
       const token = await graphJson<MetaToken>(tokenUrl)
       if (!token.access_token) throw new Error('Meta no devolvió un token de acceso.')
-      const accountsUrl = graphApiUrl('/me/assigned_instagram_accounts', env)
-      accountsUrl.searchParams.set('fields', 'id,username')
-      accountsUrl.searchParams.set('access_token', token.access_token)
-      const accounts = await graphJson<MetaPage<InstagramAccount>>(accountsUrl)
-      if (accounts.data?.length !== 1 || !accounts.data[0].id) {
+      let account: InstagramAccount | undefined
+      if (token.user_id) {
+        const accountUrl = graphApiUrl(`/${encodeURIComponent(String(token.user_id))}`, env)
+        accountUrl.searchParams.set('fields', 'id,username')
+        accountUrl.searchParams.set('access_token', token.access_token)
+        try { account = await graphJson<InstagramAccount>(accountUrl) } catch { /* Fall back to the assigned account list. */ }
+      }
+      if (!account?.id) {
+        const accountsUrl = graphApiUrl('/me/assigned_instagram_accounts', env)
+        accountsUrl.searchParams.set('fields', 'id,username')
+        accountsUrl.searchParams.set('access_token', token.access_token)
+        const accounts = await graphJson<MetaPage<InstagramAccount>>(accountsUrl)
+        const assigned = accounts.data || []
+        account = (token.user_id && assigned.find((candidate) => String(candidate.id) === String(token.user_id)))
+          || (assigned.length === 1 ? assigned[0] : undefined)
+      }
+      if (!account?.id) {
         throw new Error('Seleccioná exactamente una cuenta de Instagram al autorizar la app.')
       }
-      const account = accounts.data[0]
       // Limit the browser session even when the provider token has no expiry.
       const sessionMaxAge = Math.min(token.expires_in && token.expires_in > 0 ? token.expires_in : 86400, 86400)
       const expiresAt = Date.now() + sessionMaxAge * 1000
