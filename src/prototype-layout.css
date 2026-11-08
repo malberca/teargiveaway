@@ -347,3 +347,18 @@
   15% { opacity: 1; transform: translate3d(calc(var(--drift) * .2), -60px, 0) scale(1.15) rotate(var(--rot)); }
   100% { opacity: 0; transform: translate3d(var(--drift), -460px, 0) scale(1) rotate(calc(var(--rot) * -1)); }
 }
+
+/* Mis sorteos: finished raffles on the home screen. */
+.raffle-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 10px; }
+.raffle-item { border: 1px solid #e8e2f2; border-radius: 6px; padding: 12px 14px; background: #fff; }
+.raffle-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.raffle-head small { color: #77717d; }
+.raffle-meta { margin: 6px 0 10px; font-size: 13px; color: #77717d; }
+.raffle-actions { gap: 8px; flex-wrap: wrap; align-items: center; }
+.raffle-confirm { font-size: 12px; font-weight: 700; color: #645977; }
+.raffle-detail { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #e0d9ec; }
+.raffle-winners { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.raffle-winners b { letter-spacing: .08em; font-size: 11px; color: #645977; }
+.raffle-fingerprint code { word-break: break-all; font-size: 11px; }
+.finish-confirm { margin-top: 12px; padding: 12px 14px; border-radius: 6px; background: #f8f6fc; border: 1px solid #e8e2f2; }
+.finish-confirm p { margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #4d435d; }
