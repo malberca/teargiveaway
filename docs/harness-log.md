@@ -59,3 +59,12 @@
 - La configuración de cada sorteo ahora permite elegir entre 1 y 20 ganadores. El total seleccionado determina la cantidad de extracciones, el progreso, la animación, el estado final y las tarjetas de resultados. Se conserva 5 como valor inicial y el sorteo sigue permitiendo ganadores repetidos.
 - Verificaciones: `git diff --check`, `npm run typecheck` y `npm run build` completados correctamente. Wrangler mostró el aviso conocido `EPERM` al escribir su archivo de log; el build finalizó con código 0 y generó los assets en `dist/client/`.
 - El check de Cloudflare para el commit `7accf87` completó `npm run build`, pero falló en el deploy command `npx wrangler preview`: faltaba el bloque superior `"previews": {}` en `wrangler.jsonc`. Se agregó el bloque requerido; queda pendiente el nuevo resultado automático del check del PR.
+
+## Seguimiento — Puente OAuth de Instagram
+
+- Se agregó `worker/instagram.ts` con rutas locales `GET /api/instagram/connect`, `GET /api/instagram/callback`, `GET /api/instagram/status`, `POST /api/instagram/disconnect` y `POST /api/instagram/comments`.
+- El login solicita `instagram_business_basic` y `instagram_business_manage_comments`, intercambia el código por token largo y obtiene el usuario y los comentarios de una publicación propia encontrada por permalink. Conserva cada comentario repetido; los requisitos de like, follow y share siguen siendo manuales.
+- El token nunca vuelve al frontend: se cifra AES-GCM en el Worker y se guarda en una cookie HttpOnly SameSite=Lax con expiración. Esta entrega solo habilita sesión local de un navegador; producción/múltiples usuarios requiere almacenamiento cifrado persistente.
+- Participantes incluye conectar/desconectar la cuenta y cargar comentarios desde la publicación configurada. `.dev.vars.example` lista App ID, App Secret, callback, clave de sesión y versión de Graph API sin incluir credenciales reales. README describe la configuración en Meta.
+- Pendiente para probar OAuth real: configurar una app de Meta, registrar el callback, cargar sus secretos localmente y añadir la cuenta profesional como tester (o contar con el acceso requerido para cuentas externas). No se desplegó ni se tocó la configuración remota.
+- Verificaciones posteriores a esta integración: `npm run typecheck` PASS. `npm run build` PASS; Wrangler reporta el aviso conocido EPERM al escribir logs en `~/Library/Preferences/.wrangler/logs` pero finaliza con código 0.
